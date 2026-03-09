@@ -1,3 +1,4 @@
 flask
 telethon
 python-dotenv
+gunicorn
