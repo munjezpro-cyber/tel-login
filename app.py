@@ -3,21 +3,23 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 import asyncio
 import os
+import threading
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 # تخزين المستخدمين (في الذاكرة)
 active_users = {}
+user_lock = threading.Lock()
 
-def get_event_loop():
-    """إنشاء event loop جديد لكل طلب"""
+def run_async(coro):
+    """تشغيل كود async في Flask"""
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return loop
+    return loop.run_until_complete(coro)
 
 @app.route('/')
 def index():
@@ -25,30 +27,36 @@ def index():
 
 @app.route('/login', methods=['POST'])
 def login_step1():
-    api_id = request.form['api_id']
-    api_hash = request.form['api_hash']  # ✅ تم الإصلاح
-    phone = request.form['phone']
-
-    # إنشاء عميل تيليجرام
-    client = TelegramClient('session', int(api_id), api_hash)
-    
-    # حفظ البيانات في الجلسة
-    session_id = phone.replace('+', '').replace(' ', '')
-    active_users[session_id] = {
-        'client': client,
-        'phone': phone,
-        'api_id': api_id,
-        'api_hash': api_hash,
-        'status': 'waiting_code'
-    }
-
-    # بدء الاتصال وإرسال الكود
     try:
-        loop = get_event_loop()
-        loop.run_until_complete(client.connect())
-        loop.run_until_complete(client.send_code_request(phone))
-        flash('تم إرسال الكود إلى تيليجرام الخاص بك، يرجى إدخاله.', 'success')
-        return redirect(url_for('verify_code', session_id=session_id))
+        api_id = request.form['api_id']
+        api_hash = request.form['api_hash']
+        phone = request.form['phone']
+
+        # إنشاء عميل تيليجرام
+        client = TelegramClient('session', int(api_id), api_hash)
+        
+        # حفظ البيانات في الجلسة
+        session_id = phone.replace('+', '').replace(' ', '')
+        
+        with user_lock:
+            active_users[session_id] = {
+                'client': client,
+                'phone': phone,
+                'api_id': api_id,
+                'api_hash': api_hash,
+                'status': 'waiting_code'
+            }
+
+        # بدء الاتصال وإرسال الكود
+        try:
+            run_async(client.connect())
+            run_async(client.send_code_request(phone))
+            flash('تم إرسال الكود إلى تيليجرام الخاص بك، يرجى إدخاله.', 'success')
+            return redirect(url_for('verify_code', session_id=session_id))
+        except Exception as e:
+            flash(f'خطأ: {str(e)}', 'danger')
+            return redirect(url_for('index'))
+            
     except Exception as e:
         flash(f'خطأ: {str(e)}', 'danger')
         return redirect(url_for('index'))
@@ -60,35 +68,35 @@ def verify_code():
     if request.method == 'POST':
         code = request.form['code']
         
-        if session_id not in active_users:
-            return redirect(url_for('index'))
+        with user_lock:
+            if session_id not in active_users:
+                return redirect(url_for('index'))
+                
+            session_data = active_users[session_id]
+            client = session_data['client']
             
-        session_data = active_users[session_id]
-        client = session_data['client']
-        
-        try:
-            loop = get_event_loop()
-            loop.run_until_complete(client.sign_in(phone=session_data['phone'], code=code))
-            
-            if client.is_user_authorized():
-                session_data['status'] = 'logged_in'
-                session_data['user_id'] = client.session.user_id
-                flash('تم تسجيل الدخول بنجاح!', 'success')
-                return redirect(url_for('dashboard', session_id=session_id))
-            else:
+            try:
+                run_async(client.sign_in(phone=session_data['phone'], code=code))
+                
+                if client.is_user_authorized():
+                    session_data['status'] = 'logged_in'
+                    session_data['user_id'] = client.session.user_id
+                    flash('تم تسجيل الدخول بنجاح!', 'success')
+                    return redirect(url_for('dashboard', session_id=session_id))
+                else:
+                    session_data['status'] = 'waiting_2fa'
+                    flash('يوجد تحقق بخطوتين، يرجى إدخال كلمة المرور.', 'warning')
+                    return redirect(url_for('verify_2fa', session_id=session_id))
+                    
+            except SessionPasswordNeededError:
                 session_data['status'] = 'waiting_2fa'
                 flash('يوجد تحقق بخطوتين، يرجى إدخال كلمة المرور.', 'warning')
                 return redirect(url_for('verify_2fa', session_id=session_id))
                 
-        except SessionPasswordNeededError:
-            session_data['status'] = 'waiting_2fa'
-            flash('يوجد تحقق بخطوتين، يرجى إدخال كلمة المرور.', 'warning')
-            return redirect(url_for('verify_2fa', session_id=session_id))
-            
-        except PhoneCodeInvalidError:
-            flash('الكود غير صحيح، حاول مرة أخرى.', 'danger')
-            return render_template('index.html', step='code', session_id=session_id)
-            
+            except PhoneCodeInvalidError:
+                flash('الكود غير صحيح، حاول مرة أخرى.', 'danger')
+                return render_template('index.html', step='code', session_id=session_id)
+                
     return render_template('index.html', step='code', session_id=session_id)
 
 @app.route('/verify_2fa', methods=['GET', 'POST'])
@@ -98,23 +106,23 @@ def verify_2fa():
     if request.method == 'POST':
         password = request.form['password']
         
-        if session_id not in active_users:
-            return redirect(url_for('index'))
+        with user_lock:
+            if session_id not in active_users:
+                return redirect(url_for('index'))
+                
+            session_data = active_users[session_id]
+            client = session_data['client']
             
-        session_data = active_users[session_id]
-        client = session_data['client']
-        
-        try:
-            loop = get_event_loop()
-            loop.run_until_complete(client.sign_in(password=password))
-            session_data['status'] = 'logged_in'
-            session_data['user_id'] = client.session.user_id
-            flash('تم تسجيل الدخول بنجاح!', 'success')
-            return redirect(url_for('dashboard', session_id=session_id))
-        except Exception as e:
-            flash(f'كلمة المرور خاطئة: {str(e)}', 'danger')
-            return render_template('index.html', step='2fa', session_id=session_id)
-            
+            try:
+                run_async(client.sign_in(password=password))
+                session_data['status'] = 'logged_in'
+                session_data['user_id'] = client.session.user_id
+                flash('تم تسجيل الدخول بنجاح!', 'success')
+                return redirect(url_for('dashboard', session_id=session_id))
+            except Exception as e:
+                flash(f'كلمة المرور خاطئة: {str(e)}', 'danger')
+                return render_template('index.html', step='2fa', session_id=session_id)
+                
     return render_template('index.html', step='2fa', session_id=session_id)
 
 @app.route('/dashboard')
@@ -131,18 +139,18 @@ def send_message():
     group_id = request.form['group_id']
     message = request.form['message']
     
-    if session_id not in active_users:
-        return redirect(url_for('index'))
+    with user_lock:
+        if session_id not in active_users:
+            return redirect(url_for('index'))
+            
+        client = active_users[session_id]['client']
         
-    client = active_users[session_id]['client']
-    
-    try:
-        loop = get_event_loop()
-        loop.run_until_complete(client.send_message(group_id, message))
-        flash('تم إرسال الرسالة بنجاح!', 'success')
-    except Exception as e:
-        flash(f'فشل الإرسال: {str(e)}', 'danger')
-        
+        try:
+            run_async(client.send_message(group_id, message))
+            flash('تم إرسال الرسالة بنجاح!', 'success')
+        except Exception as e:
+            flash(f'فشل الإرسال: {str(e)}', 'danger')
+            
     return redirect(url_for('dashboard', session_id=session_id))
 
 if __name__ == '__main__':
