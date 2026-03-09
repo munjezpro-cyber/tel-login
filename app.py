@@ -26,7 +26,7 @@ def index():
 @app.route('/login', methods=['POST'])
 def login_step1():
     api_id = request.form['api_id']
-    api_hash = request.form['api_hash')
+    api_hash = request.form['api_hash']  # ✅ تم الإصلاح
     phone = request.form['phone']
 
     # إنشاء عميل تيليجرام
