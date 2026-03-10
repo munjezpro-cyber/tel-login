@@ -79,8 +79,12 @@ def verify_code():
                 run_async(client.sign_in(phone=session_data['phone'], code=code))
                 
                 if client.is_user_authorized():
+                    # الحصول على معلومات المستخدم بشكل صحيح
+                    me = run_async(client.get_me())
+                    user_id = me.id if me else None
+                    
                     session_data['status'] = 'logged_in'
-                    session_data['user_id'] = client.session.user_id
+                    session_data['user_id'] = user_id
                     flash('تم تسجيل الدخول بنجاح!', 'success')
                     return redirect(url_for('dashboard', session_id=session_id))
                 else:
@@ -115,8 +119,13 @@ def verify_2fa():
             
             try:
                 run_async(client.sign_in(password=password))
+                
+                # الحصول على معلومات المستخدم بشكل صحيح
+                me = run_async(client.get_me())
+                user_id = me.id if me else None
+                
                 session_data['status'] = 'logged_in'
-                session_data['user_id'] = client.session.user_id
+                session_data['user_id'] = user_id
                 flash('تم تسجيل الدخول بنجاح!', 'success')
                 return redirect(url_for('dashboard', session_id=session_id))
             except Exception as e:
